@@ -1,0 +1,20 @@
+import { authOptions } from "@/lib/auth";
+import { buildMusicLibrary } from "@/lib/spotify";
+import { getServerSession } from "next-auth";
+import { NextResponse } from "next/server";
+
+export async function GET() {
+  const session = await getServerSession(authOptions);
+
+  if (!session?.accessToken) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
+  try {
+    const library = await buildMusicLibrary(session.accessToken);
+    return NextResponse.json(library);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Failed to fetch library";
+    return NextResponse.json({ error: message }, { status: 500 });
+  }
+}
