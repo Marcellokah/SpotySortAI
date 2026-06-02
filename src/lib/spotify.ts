@@ -42,13 +42,36 @@ function createSpotifyHeaders(accessToken: string, extraHeaders?: Record<string,
   };
 }
 
-async function spotifyApiGet<T>(accessToken: string, url: string): Promise<T> {
+async function spotifyApiGet<T>(accessToken: string, url: string, retries = 3): Promise<T> {
   const response = await fetch(url, {
     headers: {
       ...createSpotifyHeaders(accessToken)
     },
     cache: "no-store"
   });
+
+  if (response.status === 429 && retries > 0) {
+    const retryAfter = response.headers.get("Retry-After");
+    let delayMs = 2000;
+    if (retryAfter) {
+      const parsed = parseInt(retryAfter, 10);
+      if (!isNaN(parsed)) {
+        delayMs = parsed * 1000;
+      }
+    }
+
+    if (delayMs > 10000) {
+      console.log(`[Spotify API] Rate limited (429) for GET ${url}. Retry-After is too long (${delayMs}ms). Aborting.`);
+      const error = new Error(`Spotify API rate limit exceeded. Please try again later.`) as SpotifyApiError;
+      error.status = 429;
+      error.url = url;
+      throw error;
+    }
+
+    console.log(`[Spotify API] Rate limited (429) for GET ${url}. Retrying in ${delayMs}ms...`);
+    await new Promise((resolve) => setTimeout(resolve, delayMs));
+    return spotifyApiGet<T>(accessToken, url, retries - 1);
+  }
 
   if (!response.ok) {
     const bodyText = await response.text();
@@ -142,40 +165,45 @@ export async function buildMusicLibrary(
   const userPlaylists = await getAllUserOwnedPlaylists(accessToken, profile.id);
 
   const warnings: string[] = [];
+  const playlistTracksRaw: { playlist: UserPlaylist; tracks: SpotifyTrack[] }[] = [];
 
-  const playlistTracksRaw = await Promise.all(
-    userPlaylists.map(async (playlist) => {
-      if (currentUserId && playlist.ownerId !== currentUserId) {
+  // Fetch playlist tracks sequentially to avoid massive API bursts that trigger 429
+  for (const playlist of userPlaylists) {
+    if (currentUserId && playlist.ownerId !== currentUserId) {
+      console.log(
+        `[Spotify API] Skipping playlist ${playlist.name} (${playlist.id}) because owner ${playlist.ownerId} does not match session user ${currentUserId}`
+      );
+      playlistTracksRaw.push({ playlist, tracks: [] });
+      continue;
+    }
+
+    try {
+      const tracks = await getPlaylistTracks(accessToken, playlist.id);
+      playlistTracksRaw.push({ playlist, tracks });
+    } catch (error) {
+      const spotifyError = error as SpotifyApiError;
+
+      if (spotifyError.status === 401 || spotifyError.status === 403 || spotifyError.status === 429) {
+        console.log(`[Spotify API] Failed playlist fetch for ${playlist.name} (${playlist.id})`);
         console.log(
-          `[Spotify API] Skipping playlist ${playlist.name} (${playlist.id}) because owner ${playlist.ownerId} does not match session user ${currentUserId}`
+          `[Spotify API] status=${spotifyError.status} statusText=${spotifyError.statusText ?? ""}`
         );
-        return { playlist, tracks: [] as SpotifyTrack[] };
+        console.log(`[Spotify API] body=${spotifyError.bodyText ?? ""}`);
+        warnings.push(
+          `Spotify playlist fetch failed with ${spotifyError.status ?? "unknown"} ${
+            spotifyError.statusText ?? ""
+          }`
+        );
+        playlistTracksRaw.push({ playlist, tracks: [] });
+        continue;
       }
 
-      try {
-        const tracks = await getPlaylistTracks(accessToken, playlist.id);
-        return { playlist, tracks };
-      } catch (error) {
-        const spotifyError = error as SpotifyApiError;
+      throw error;
+    }
 
-        if (spotifyError.status === 401 || spotifyError.status === 403) {
-          console.log(`[Spotify API] Failed playlist fetch for ${playlist.name} (${playlist.id})`);
-          console.log(
-            `[Spotify API] status=${spotifyError.status} statusText=${spotifyError.statusText ?? ""}`
-          );
-          console.log(`[Spotify API] body=${spotifyError.bodyText ?? ""}`);
-          warnings.push(
-            `Spotify playlist fetch failed with ${spotifyError.status ?? "unknown"} ${
-              spotifyError.statusText ?? ""
-            }`
-          );
-          return { playlist, tracks: [] as SpotifyTrack[] };
-        }
-
-        throw error;
-      }
-    })
-  );
+    // Small intentional delay between playlists to further reduce rate limit pressure
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
 
   const likedSongs = likedRaw.map((track) => normalizeTrack(track));
 
@@ -196,7 +224,8 @@ export async function spotifyApiWrite<T>(
   accessToken: string,
   url: string,
   method: "POST" | "DELETE",
-  body?: unknown
+  body?: unknown,
+  retries = 3
 ): Promise<T> {
   const response = await fetch(url, {
     method,
@@ -208,6 +237,29 @@ export async function spotifyApiWrite<T>(
     body: body ? JSON.stringify(body) : undefined,
     cache: "no-store"
   });
+
+  if (response.status === 429 && retries > 0) {
+    const retryAfter = response.headers.get("Retry-After");
+    let delayMs = 2000;
+    if (retryAfter) {
+      const parsed = parseInt(retryAfter, 10);
+      if (!isNaN(parsed)) {
+        delayMs = parsed * 1000;
+      }
+    }
+
+    if (delayMs > 10000) {
+      console.log(`[Spotify API] Rate limited (429) for ${method} ${url}. Retry-After is too long (${delayMs}ms). Aborting.`);
+      const error = new Error(`Spotify API rate limit exceeded. Please try again later.`) as SpotifyApiError;
+      error.status = 429;
+      error.url = url;
+      throw error;
+    }
+
+    console.log(`[Spotify API] Rate limited (429) for ${method} ${url}. Retrying in ${delayMs}ms...`);
+    await new Promise((resolve) => setTimeout(resolve, delayMs));
+    return spotifyApiWrite<T>(accessToken, url, method, body, retries - 1);
+  }
 
   if (!response.ok) {
     const bodyText = await response.text();

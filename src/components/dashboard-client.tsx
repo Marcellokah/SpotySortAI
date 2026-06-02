@@ -58,9 +58,8 @@ export function DashboardClient() {
 
       setData(json as SortApiResponse);
 
-      const warnings = Array.isArray((libraryJson as MusicLibraryPayload).warnings)
-        ? (libraryJson as MusicLibraryPayload).warnings
-        : [];
+      const payload = libraryJson as MusicLibraryPayload;
+      const warnings = Array.isArray(payload.warnings) ? payload.warnings : [];
 
       if (warnings.length > 0) {
         setMessage(warnings.join(" \n"));
