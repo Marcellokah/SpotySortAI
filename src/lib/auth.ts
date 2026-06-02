@@ -1,10 +1,25 @@
 import NextAuth, { NextAuthOptions } from "next-auth";
+import type { JWT } from "next-auth/jwt";
 import SpotifyProvider from "next-auth/providers/spotify";
 
 const SPOTIFY_TOKEN_URL = "https://accounts.spotify.com/api/token";
+const spotifyScopes = [
+  "user-library-read",
+  "playlist-read-private",
+  "playlist-read-collaborative",
+  "playlist-modify-private",
+  "playlist-modify-public"
+].join(" ");
 
-async function refreshAccessToken(token: any) {
+async function refreshAccessToken(token: JWT) {
   try {
+    if (!token.refreshToken) {
+      return {
+        ...token,
+        error: "RefreshAccessTokenError" as const
+      };
+    }
+
     const params = new URLSearchParams({
       grant_type: "refresh_token",
       refresh_token: token.refreshToken
@@ -44,20 +59,14 @@ async function refreshAccessToken(token: any) {
 }
 
 export const authOptions: NextAuthOptions = {
+  secret: process.env.NEXTAUTH_SECRET || process.env.BETTER_AUTH_SECRET,
   providers: [
     SpotifyProvider({
       clientId: process.env.SPOTIFY_CLIENT_ID || "",
       clientSecret: process.env.SPOTIFY_CLIENT_SECRET || "",
       authorization: {
         params: {
-          scope: [
-            "user-library-read",
-            "playlist-read-private",
-            "playlist-read-collaborative",
-            "playlist-modify-private",
-            "playlist-modify-public"
-          ].join(" "),
-          show_dialog: true,
+          scope: spotifyScopes,
           prompt: "consent"
         }
       }
@@ -69,13 +78,12 @@ export const authOptions: NextAuthOptions = {
   callbacks: {
     async jwt({ token, account, profile }) {
       if (account) {
-        return {
-          ...token,
-          accessToken: account.access_token,
-          refreshToken: account.refresh_token,
-          accessTokenExpires: account.expires_at ? account.expires_at * 1000 : undefined,
-          userId: (profile as { id?: string } | undefined)?.id
-        };
+        token.accessToken = account.access_token;
+        token.refreshToken = account.refresh_token;
+        token.accessTokenExpires = account.expires_at ? account.expires_at * 1000 : undefined;
+        token.userId = (profile as { id?: string } | undefined)?.id ?? token.userId;
+
+        return token;
       }
 
       if (token.accessTokenExpires && Date.now() < token.accessTokenExpires) {
@@ -88,6 +96,10 @@ export const authOptions: NextAuthOptions = {
       session.accessToken = token.accessToken;
       session.userId = token.userId;
       session.error = token.error;
+      session.user = {
+        ...session.user,
+        id: token.userId
+      };
       return session;
     }
   }

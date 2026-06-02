@@ -5,12 +5,6 @@ type SpotifyPaging<T> = {
   next: string | null;
 };
 
-type SpotifyArtist = {
-  id: string;
-  name: string;
-  genres: string[];
-};
-
 type SpotifyTrack = {
   id: string;
   uri: string;
@@ -34,17 +28,40 @@ type PlaylistTrackItem = {
   track: SpotifyTrack | null;
 };
 
+type SpotifyApiError = Error & {
+  status?: number;
+  statusText?: string;
+  bodyText?: string;
+  url?: string;
+};
+
+function createSpotifyHeaders(accessToken: string, extraHeaders?: Record<string, string>) {
+  return {
+    Authorization: `Bearer ${accessToken}`,
+    ...extraHeaders
+  };
+}
+
 async function spotifyApiGet<T>(accessToken: string, url: string): Promise<T> {
   const response = await fetch(url, {
     headers: {
-      Authorization: `Bearer ${accessToken}`
+      ...createSpotifyHeaders(accessToken)
     },
     cache: "no-store"
   });
 
   if (!response.ok) {
     const bodyText = await response.text();
-    throw new Error(`Spotify API error (${response.status}) for ${url}: ${bodyText}`);
+    console.log(`[Spotify API] GET ${url}`);
+    console.log(`[Spotify API] status=${response.status} statusText=${response.statusText}`);
+    console.log(`[Spotify API] body=${bodyText}`);
+
+    const error = new Error(`Spotify API error (${response.status}) for ${url}`) as SpotifyApiError;
+    error.status = response.status;
+    error.statusText = response.statusText;
+    error.bodyText = bodyText;
+    error.url = url;
+    throw error;
   }
 
   return response.json() as Promise<T>;
@@ -99,68 +116,27 @@ export async function getAllUserOwnedPlaylists(
 export async function getPlaylistTracks(accessToken: string, playlistId: string): Promise<SpotifyTrack[]> {
   const items = await collectPaginated<PlaylistTrackItem>(
     accessToken,
-    `https://api.spotify.com/v1/playlists/${playlistId}/tracks?limit=100`
+    `https://api.spotify.com/v1/playlists/${playlistId}/items?limit=100`
   );
 
   return items.map((item) => item.track).filter((track): track is SpotifyTrack => Boolean(track?.id));
 }
 
-function normalizeTrack(track: SpotifyTrack, artistGenresMap: Map<string, string[]>): NormalizedTrack {
-  const artistIds = track.artists.map((artist) => artist.id).filter(Boolean);
-  const genres = Array.from(
-    new Set(
-      artistIds.flatMap((artistId) => artistGenresMap.get(artistId) ?? [])
-    )
-  );
-
+function normalizeTrack(track: SpotifyTrack): NormalizedTrack {
   return {
     id: track.id,
     uri: track.uri,
     name: track.name,
-    artists: track.artists,
-    artistIds,
-    genres
+    artists: track.artists
   };
 }
 
-async function getArtistsByIds(
+export async function buildMusicLibrary(
   accessToken: string,
-  artistIds: string[],
-  warnings: string[]
-): Promise<Map<string, string[]>> {
-  const uniqueIds = Array.from(new Set(artistIds.filter(Boolean)));
-  const map = new Map<string, string[]>();
+  currentUserId?: string
+): Promise<MusicLibraryPayload> {
+  console.log("Current Access Token:", accessToken);
 
-  if (uniqueIds.length === 0) {
-    return map;
-  }
-
-  for (let i = 0; i < uniqueIds.length; i += 50) {
-    const chunk = uniqueIds.slice(i, i + 50);
-    try {
-      const data = await spotifyApiGet<{ artists: SpotifyArtist[] }>(
-        accessToken,
-        `https://api.spotify.com/v1/artists?ids=${chunk.join(",")}`
-      );
-
-      data.artists.forEach((artist) => {
-        map.set(artist.id, artist.genres || []);
-      });
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "Unknown artist fetch error";
-      if (message.includes("Spotify API error (401)") || message.includes("Spotify API error (403)")) {
-        warnings.push(`Skipped artist genre lookup for ${chunk.length} artists due to Spotify permissions.`);
-        continue;
-      }
-
-      throw error;
-    }
-  }
-
-  return map;
-}
-
-export async function buildMusicLibrary(accessToken: string): Promise<MusicLibraryPayload> {
   const profile = await getCurrentUserProfile(accessToken);
   const likedRaw = await getAllLikedTracks(accessToken);
   const userPlaylists = await getAllUserOwnedPlaylists(accessToken, profile.id);
@@ -169,13 +145,30 @@ export async function buildMusicLibrary(accessToken: string): Promise<MusicLibra
 
   const playlistTracksRaw = await Promise.all(
     userPlaylists.map(async (playlist) => {
+      if (currentUserId && playlist.ownerId !== currentUserId) {
+        console.log(
+          `[Spotify API] Skipping playlist ${playlist.name} (${playlist.id}) because owner ${playlist.ownerId} does not match session user ${currentUserId}`
+        );
+        return { playlist, tracks: [] as SpotifyTrack[] };
+      }
+
       try {
         const tracks = await getPlaylistTracks(accessToken, playlist.id);
         return { playlist, tracks };
       } catch (error) {
-        const message = error instanceof Error ? error.message : "Unknown playlist fetch error";
-        if (message.includes("Spotify API error (403)")) {
-          warnings.push(`Skipped inaccessible playlist: ${playlist.name}`);
+        const spotifyError = error as SpotifyApiError;
+
+        if (spotifyError.status === 401 || spotifyError.status === 403) {
+          console.log(`[Spotify API] Failed playlist fetch for ${playlist.name} (${playlist.id})`);
+          console.log(
+            `[Spotify API] status=${spotifyError.status} statusText=${spotifyError.statusText ?? ""}`
+          );
+          console.log(`[Spotify API] body=${spotifyError.bodyText ?? ""}`);
+          warnings.push(
+            `Spotify playlist fetch failed with ${spotifyError.status ?? "unknown"} ${
+              spotifyError.statusText ?? ""
+            }`
+          );
           return { playlist, tracks: [] as SpotifyTrack[] };
         }
 
@@ -184,20 +177,11 @@ export async function buildMusicLibrary(accessToken: string): Promise<MusicLibra
     })
   );
 
-  const allArtistIds = [
-    ...likedRaw.flatMap((track) => track.artists.map((artist) => artist.id)),
-    ...playlistTracksRaw.flatMap((entry) =>
-      entry.tracks.flatMap((track) => track.artists.map((artist) => artist.id))
-    )
-  ];
-
-  const artistGenresMap = await getArtistsByIds(accessToken, allArtistIds, warnings);
-
-  const likedSongs = likedRaw.map((track) => normalizeTrack(track, artistGenresMap));
+  const likedSongs = likedRaw.map((track) => normalizeTrack(track));
 
   const playlists: PlaylistWithTracks[] = playlistTracksRaw.map((entry) => ({
     ...entry.playlist,
-    tracks: entry.tracks.map((track) => normalizeTrack(track, artistGenresMap))
+    tracks: entry.tracks.map((track) => normalizeTrack(track))
   }));
 
   return {
@@ -217,8 +201,9 @@ export async function spotifyApiWrite<T>(
   const response = await fetch(url, {
     method,
     headers: {
-      Authorization: `Bearer ${accessToken}`,
-      "Content-Type": "application/json"
+      ...createSpotifyHeaders(accessToken, {
+        "Content-Type": "application/json"
+      })
     },
     body: body ? JSON.stringify(body) : undefined,
     cache: "no-store"

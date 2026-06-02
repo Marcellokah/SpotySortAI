@@ -2,8 +2,10 @@ import { authOptions } from "@/lib/auth";
 import { buildMusicLibrary } from "@/lib/spotify";
 import { AiSortResponse, MusicLibraryPayload } from "@/lib/types";
 import { GoogleGenerativeAI } from "@google/generative-ai";
-import { getServerSession } from "next-auth";
+import { getServerSession } from "next-auth/next";
 import { NextRequest, NextResponse } from "next/server";
+
+export const dynamic = "force-dynamic";
 
 function parseModelJson(text: string): AiSortResponse {
   const cleaned = text
@@ -93,7 +95,7 @@ export async function POST(request: NextRequest) {
       library?: MusicLibraryPayload;
     };
 
-    const library = body.library ?? (await buildMusicLibrary(session.accessToken));
+    const library = body.library ?? (await buildMusicLibrary(session.accessToken, session.userId));
 
     const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
     const model = genAI.getGenerativeModel({

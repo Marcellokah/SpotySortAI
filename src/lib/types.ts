@@ -8,8 +8,6 @@ export type NormalizedTrack = {
   uri: string;
   name: string;
   artists: TrackArtist[];
-  artistIds: string[];
-  genres: string[];
 };
 
 export type UserPlaylist = {

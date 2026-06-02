@@ -1,7 +1,7 @@
 import { authOptions } from "@/lib/auth";
 import { getCurrentUserProfile, spotifyApiWrite } from "@/lib/spotify";
 import { AiAssignment, NewPlaylistSuggestion, RefactorSuggestion } from "@/lib/types";
-import { getServerSession } from "next-auth";
+import { getServerSession } from "next-auth/next";
 import { NextRequest, NextResponse } from "next/server";
 
 type ExecuteBody = {
