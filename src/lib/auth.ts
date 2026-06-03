@@ -5,6 +5,7 @@ import SpotifyProvider from "next-auth/providers/spotify";
 const SPOTIFY_TOKEN_URL = "https://accounts.spotify.com/api/token";
 const spotifyScopes = [
   "user-library-read",
+  "user-library-modify",
   "playlist-read-private",
   "playlist-read-collaborative",
   "playlist-modify-private",
