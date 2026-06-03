@@ -11,6 +11,20 @@ import { signIn, signOut, useSession } from "next-auth/react";
 import { useCallback, useMemo, useState } from "react";
 
 type LibraryApiResponse = MusicLibraryPayload;
+type ItemState = "pending" | "approved" | "rejected";
+
+const CheckIcon = () => (
+  <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+    <polyline points="20 6 9 17 4 12" />
+  </svg>
+);
+
+const XIcon = () => (
+  <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+    <line x1="18" y1="6" x2="6" y2="18" />
+    <line x1="6" y1="6" x2="18" y2="18" />
+  </svg>
+);
 
 export function DashboardClient() {
   const { data: session, status } = useSession();
@@ -21,6 +35,9 @@ export function DashboardClient() {
   const [currentChunkIndex, setCurrentChunkIndex] = useState(0);
   const [totalChunks, setTotalChunks] = useState(0);
   const [chunkProposal, setChunkProposal] = useState<AiSortResponse | null>(null);
+
+  // Granular Item State
+  const [itemStatus, setItemStatus] = useState<Record<string, ItemState>>({});
 
   // Loading States
   const [loadingLibrary, setLoadingLibrary] = useState(false);
@@ -180,6 +197,13 @@ export function DashboardClient() {
         trackIds,
       }));
 
+      // Initialize all new items as 'pending'
+      const initialStatus: Record<string, ItemState> = {};
+      newProposal.assignments.forEach(a => initialStatus[`assignment-${a.trackId}`] = 'pending');
+      newProposal.newPlaylists.forEach(p => initialStatus[`newPlaylist-${p.name}`] = 'pending');
+      newProposal.refactorSuggestions.forEach(r => initialStatus[`refactor-${r.trackId}`] = 'pending');
+      setItemStatus(initialStatus);
+
       setChunkProposal(newProposal);
     } catch (error) {
       console.error(`Error processing chunk ${currentChunkIndex + 1}:`, error);
@@ -189,9 +213,22 @@ export function DashboardClient() {
     }
   }, [library, currentChunkIndex, totalChunks]);
 
-  const approveAndApplyChunk = useCallback(async () => {
+  const executeApprovedActions = useCallback(async () => {
     if (!chunkProposal) return;
     
+    // Filter out only the explicitly 'approved' items
+    const approvedAssignments = chunkProposal.assignments.filter(a => itemStatus[`assignment-${a.trackId}`] === 'approved');
+    const approvedNewPlaylists = chunkProposal.newPlaylists.filter(p => itemStatus[`newPlaylist-${p.name}`] === 'approved');
+    const approvedRefactors = chunkProposal.refactorSuggestions.filter(r => itemStatus[`refactor-${r.trackId}`] === 'approved');
+
+    if (approvedAssignments.length === 0 && approvedNewPlaylists.length === 0 && approvedRefactors.length === 0) {
+      // Nothing approved, just skip execution and increment chunk
+      setMessage(`Chunk ${currentChunkIndex + 1} skipped (no actions approved).`);
+      setChunkProposal(null);
+      setCurrentChunkIndex(prev => prev + 1);
+      return;
+    }
+
     try {
       setExecuting(true);
       setMessage(null);
@@ -202,9 +239,9 @@ export function DashboardClient() {
           "Content-Type": "application/json"
         },
         body: JSON.stringify({
-          assignments: chunkProposal.assignments,
-          newPlaylists: chunkProposal.newPlaylists,
-          refactorSuggestions: chunkProposal.refactorSuggestions,
+          assignments: approvedAssignments,
+          newPlaylists: approvedNewPlaylists,
+          refactorSuggestions: approvedRefactors,
           removeFromLiked
         })
       });
@@ -215,7 +252,7 @@ export function DashboardClient() {
         throw new Error(json.error || "Failed to apply Spotify changes");
       }
 
-      setMessage(`Chunk ${currentChunkIndex + 1} applied to Spotify successfully!`);
+      setMessage(`Chunk ${currentChunkIndex + 1} approved actions applied to Spotify successfully!`);
       
       // Step-by-Step Progression: Clear current results and advance the index
       setChunkProposal(null);
@@ -225,177 +262,310 @@ export function DashboardClient() {
     } finally {
       setExecuting(false);
     }
-  }, [chunkProposal, currentChunkIndex, removeFromLiked]);
+  }, [chunkProposal, currentChunkIndex, itemStatus, removeFromLiked]);
 
-  const totalSuggestions = useMemo(() => {
-    if (!chunkProposal) return 0;
-    return (
-      chunkProposal.assignments.length +
-      chunkProposal.newPlaylists.length +
-      chunkProposal.refactorSuggestions.length
-    );
-  }, [chunkProposal]);
+  const { approvedCount, rejectedCount, pendingCount } = useMemo(() => {
+    let approved = 0;
+    let rejected = 0;
+    let pending = 0;
+    Object.values(itemStatus).forEach(status => {
+      if (status === 'approved') approved++;
+      else if (status === 'rejected') rejected++;
+      else pending++;
+    });
+    return { approvedCount: approved, rejectedCount: rejected, pendingCount: pending };
+  }, [itemStatus]);
 
   if (status === "loading") {
-    return <p className="text-slate-700">Loading session...</p>;
+    return <div className="min-h-screen bg-[#121212] flex items-center justify-center text-zinc-400">Loading session...</div>;
   }
 
   if (!isLoggedIn) {
     return (
-      <div className="rounded-2xl border border-slate-200 bg-white p-6">
-        <p className="text-slate-700">Sign in with Spotify to use the dashboard.</p>
-        <button
-          type="button"
-          onClick={() => signIn("spotify")}
-          className="mt-4 rounded-full bg-brand-700 px-5 py-2 text-white"
-        >
-          Sign in
-        </button>
+      <div className="min-h-screen bg-[#121212] p-6 flex items-center justify-center">
+        <div className="rounded-2xl border border-zinc-800 bg-[#181818] p-8 text-center max-w-md w-full shadow-2xl">
+          <h2 className="text-2xl font-bold text-white mb-4">Spotify AI Sorter</h2>
+          <p className="text-zinc-400 mb-8">Sign in with your Spotify account to analyze and organize your liked songs.</p>
+          <button
+            type="button"
+            onClick={() => signIn("spotify")}
+            className="w-full rounded-full bg-[#1DB954] hover:bg-[#1ed760] px-6 py-3 font-bold text-black transition-colors"
+          >
+            Sign in with Spotify
+          </button>
+        </div>
       </div>
     );
   }
 
-  return (
-    <div className="space-y-6">
-      <header className="rounded-2xl border border-slate-200 bg-white/90 p-6 shadow">
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <div>
-            <h1 className="text-2xl font-bold text-slate-900">Dashboard</h1>
-            <p className="mt-1 text-slate-600">Step-by-step library analysis and sorting.</p>
-          </div>
-          <button
-            type="button"
-            onClick={() => signOut()}
-            className="rounded-full border border-slate-300 px-4 py-2 font-semibold text-slate-700"
-          >
-            Sign out
-          </button>
-        </div>
+  const processedCount = Math.min(currentChunkIndex * CHUNK_SIZE, library?.likedSongs.length || 0);
+  const totalSongsCount = library?.likedSongs.length || 0;
 
-        <div className="mt-5 flex flex-wrap items-center gap-3">
-          {!library ? (
+  return (
+    <div className="min-h-screen bg-[#121212] text-white p-6 font-sans">
+      <div className="max-w-5xl mx-auto space-y-8">
+        
+        {/* Header */}
+        <header className="rounded-2xl border border-zinc-800 bg-[#181818] p-6 shadow-xl">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <h1 className="text-2xl font-bold text-white">Dashboard</h1>
+              <p className="mt-1 text-zinc-400">Step-by-step AI sorting with granular control.</p>
+            </div>
             <button
               type="button"
-              onClick={loadLibrary}
-              disabled={loadingLibrary}
-              className="rounded-full bg-slate-900 px-5 py-2 font-semibold text-white disabled:opacity-60"
+              onClick={() => signOut()}
+              className="rounded-full border border-zinc-700 hover:border-zinc-500 px-4 py-2 font-semibold text-zinc-300 transition-colors"
             >
-              {loadingLibrary ? "Loading Library..." : "Fetch Spotify Library"}
+              Sign out
             </button>
-          ) : currentChunkIndex < totalChunks ? (
-            !chunkProposal ? (
+          </div>
+
+          <div className="mt-6 flex flex-wrap items-center gap-4">
+            {!library ? (
               <button
                 type="button"
-                onClick={analyzeCurrentChunk}
-                disabled={analyzing || executing}
-                className="rounded-full bg-brand-700 px-5 py-2 font-semibold text-white disabled:opacity-60"
+                onClick={loadLibrary}
+                disabled={loadingLibrary}
+                className="rounded-full bg-white hover:bg-zinc-200 px-6 py-2.5 font-bold text-black disabled:opacity-60 transition-colors"
               >
-                {analyzing 
-                  ? `Analyzing chunk ${currentChunkIndex + 1} of ${totalChunks}...` 
-                  : `Process Next 50 Songs (Chunk ${currentChunkIndex + 1} of ${totalChunks})`}
+                {loadingLibrary ? "Loading Library..." : "Fetch Spotify Library"}
               </button>
-            ) : (
-              <button
-                type="button"
-                onClick={approveAndApplyChunk}
-                disabled={executing || analyzing}
-                className="rounded-full bg-emerald-600 px-5 py-2 font-semibold text-white disabled:opacity-60"
-              >
-                {executing ? "Applying to Spotify..." : "Approve & Apply Current Chunk"}
-              </button>
-            )
-          ) : (
-            <div className="rounded-full bg-slate-100 px-5 py-2 font-semibold text-slate-600">
-              All chunks processed!
-            </div>
-          )}
-
-          {library && currentChunkIndex < totalChunks && (
-            <label className="inline-flex items-center gap-2 rounded-full border border-slate-300 px-4 py-2 text-sm font-medium text-slate-700">
-              <input
-                type="checkbox"
-                checked={removeFromLiked}
-                onChange={(event) => setRemoveFromLiked(event.target.checked)}
-              />
-              Remove approved songs from Liked Songs
-            </label>
-          )}
-        </div>
-      </header>
-
-      {message ? <p className="rounded-xl border border-slate-200 bg-white p-4 text-sm text-slate-700 shadow-sm">{message}</p> : null}
-
-      {chunkProposal ? (
-        <section className="space-y-6">
-          <article className="rounded-2xl border border-slate-200 bg-white p-6 shadow">
-            <p className="text-sm uppercase tracking-[0.2em] text-brand-700">Chunk {currentChunkIndex + 1} Summary</p>
-            <p className="mt-2 text-slate-800">{chunkProposal.summary}</p>
-            <p className="mt-2 text-sm text-slate-500">Total suggestions in this chunk: {totalSuggestions}</p>
-          </article>
-
-          <article className="rounded-2xl border border-slate-200 bg-white p-6 shadow">
-            <h2 className="text-xl font-semibold text-slate-900">Task A: Liked Song Sorting</h2>
-            <div className="mt-4 space-y-3">
-              {chunkProposal.assignments.map((item) => (
-                <div key={`${item.trackId}-${item.targetPlaylistName}`} className="rounded-xl border border-slate-200 p-4">
-                  <p className="font-semibold text-slate-900">{item.trackName}</p>
-                  <p className="text-sm text-slate-600">{item.artistNames.join(", ")}</p>
-                  <p className="mt-2 text-sm text-slate-700">
-                    Target: <span className="font-semibold">{item.targetPlaylistName}</span>
-                  </p>
-                  <p className="text-sm text-slate-500">{item.reason}</p>
-                </div>
-              ))}
-              {chunkProposal.assignments.length === 0 ? (
-                <p className="text-sm text-slate-500">No sorting suggestions for this chunk.</p>
-              ) : null}
-            </div>
-          </article>
-
-          <article className="rounded-2xl border border-slate-200 bg-white p-6 shadow">
-            <h2 className="text-xl font-semibold text-slate-900">Task B: New Playlist Suggestions</h2>
-            <div className="mt-4 space-y-3">
-              {chunkProposal.newPlaylists.map((item) => (
-                <div key={item.name} className="rounded-xl border border-slate-200 p-4">
-                  <p className="font-semibold text-slate-900">{item.name}</p>
-                  <p className="text-sm text-slate-600">{item.description || "No description provided"}</p>
-                  <p className="mt-1 text-sm text-slate-500">Tracks: {item.trackIds.length}</p>
-                </div>
-              ))}
-              {chunkProposal.newPlaylists.length === 0 ? (
-                <p className="text-sm text-slate-500">No new playlist suggestions for this chunk.</p>
-              ) : null}
-            </div>
-          </article>
-
-          <article className="rounded-2xl border border-slate-200 bg-white p-6 shadow">
-            <h2 className="text-xl font-semibold text-slate-900">Task C: Playlist Refactor Suggestions</h2>
-            <div className="mt-4 space-y-3">
-              {chunkProposal.refactorSuggestions.map((item) => (
-                <div
-                  key={`${item.trackId}-${item.fromPlaylistId}-${item.toPlaylistId}`}
-                  className="rounded-xl border border-slate-200 p-4"
+            ) : currentChunkIndex < totalChunks ? (
+              !chunkProposal ? (
+                <button
+                  type="button"
+                  onClick={analyzeCurrentChunk}
+                  disabled={analyzing || executing}
+                  className="rounded-full bg-white hover:bg-zinc-200 px-6 py-2.5 font-bold text-black disabled:opacity-60 transition-colors"
                 >
-                  <p className="font-semibold text-slate-900">{item.trackName}</p>
-                  <p className="text-sm text-slate-700">
-                    Move from <span className="font-semibold">{item.fromPlaylistName}</span> to{" "}
-                    <span className="font-semibold">{item.toPlaylistName}</span>
-                  </p>
-                  <p className="text-sm text-slate-500">{item.reason}</p>
-                </div>
-              ))}
-              {chunkProposal.refactorSuggestions.length === 0 ? (
-                <p className="text-sm text-slate-500">No refactor suggestions for this chunk.</p>
-              ) : null}
+                  {analyzing 
+                    ? `Analyzing chunk ${currentChunkIndex + 1} of ${totalChunks}...` 
+                    : `Process Next 50 Songs (Chunk ${currentChunkIndex + 1} of ${totalChunks})`}
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  onClick={executeApprovedActions}
+                  disabled={executing || analyzing}
+                  className="rounded-full bg-[#1DB954] hover:bg-[#1ed760] px-6 py-2.5 font-bold text-black disabled:opacity-60 transition-colors shadow-lg shadow-[#1DB954]/20"
+                >
+                  {executing ? "Applying to Spotify..." : "Execute Approved Actions"}
+                </button>
+              )
+            ) : (
+              <div className="rounded-full bg-zinc-800 px-6 py-2.5 font-bold text-zinc-300 border border-zinc-700">
+                All chunks processed!
+              </div>
+            )}
+
+            {library && currentChunkIndex < totalChunks && (
+              <label className="inline-flex items-center gap-3 rounded-full border border-zinc-800 bg-zinc-900/50 px-5 py-2.5 text-sm font-medium text-zinc-300 cursor-pointer hover:bg-zinc-800 transition-colors">
+                <input
+                  type="checkbox"
+                  checked={removeFromLiked}
+                  onChange={(event) => setRemoveFromLiked(event.target.checked)}
+                  className="accent-[#1DB954] w-4 h-4 cursor-pointer rounded bg-zinc-800 border-zinc-700"
+                />
+                Remove approved songs from Liked Songs
+              </label>
+            )}
+          </div>
+        </header>
+
+        {/* Global Progress Bar */}
+        {library && (
+          <section className="rounded-2xl border border-zinc-800 bg-[#181818] p-6 shadow-xl">
+            <div className="flex justify-between text-sm font-medium mb-3">
+              <span className="text-zinc-300 tracking-wide">Global Progress</span>
+              <span className="text-zinc-400">Processed: <span className="text-white">{processedCount}</span> / {totalSongsCount} Liked Songs</span>
             </div>
-          </article>
-        </section>
-      ) : library && currentChunkIndex < totalChunks ? (
-        <section className="rounded-2xl border border-slate-200 bg-white p-12 text-center shadow">
-          <p className="text-lg font-medium text-slate-700">Ready to analyze chunk {currentChunkIndex + 1} of {totalChunks}.</p>
-          <p className="mt-2 text-sm text-slate-500">Click &quot;Process Next 50 Songs&quot; above to continue.</p>
-        </section>
-      ) : null}
+            <div className="h-2.5 w-full bg-zinc-800 rounded-full overflow-hidden">
+              <div 
+                className="h-full bg-[#1DB954] transition-all duration-700 ease-out"
+                style={{ width: `${totalSongsCount > 0 ? (processedCount / totalSongsCount) * 100 : 0}%` }}
+              />
+            </div>
+          </section>
+        )}
+
+        {message ? (
+          <div className="rounded-xl border border-zinc-700 bg-zinc-800 p-4 text-sm text-zinc-200 shadow-lg">
+            {message}
+          </div>
+        ) : null}
+
+        {chunkProposal ? (
+          <section className="space-y-6 pb-20">
+            <article className="rounded-2xl border border-zinc-800 bg-[#181818] p-6 shadow-xl">
+              <div className="flex justify-between items-start">
+                <div>
+                  <p className="text-xs font-bold uppercase tracking-[0.2em] text-[#1DB954]">Chunk {currentChunkIndex + 1} Summary</p>
+                  <p className="mt-2 text-zinc-200">{chunkProposal.summary}</p>
+                </div>
+                <div className="flex gap-4 text-sm font-medium text-zinc-400 bg-zinc-900/50 p-3 rounded-xl border border-zinc-800">
+                  <div className="flex flex-col items-center"><span className="text-[#1DB954] text-lg">{approvedCount}</span> Approved</div>
+                  <div className="flex flex-col items-center"><span className="text-red-400 text-lg">{rejectedCount}</span> Skipped</div>
+                  <div className="flex flex-col items-center"><span className="text-zinc-300 text-lg">{pendingCount}</span> Pending</div>
+                </div>
+              </div>
+            </article>
+
+            {/* Task A: Assignments */}
+            {chunkProposal.assignments.length > 0 && (
+              <article>
+                <h2 className="text-xl font-bold text-white mb-4 px-2">Task A: Liked Song Sorting</h2>
+                <div className="space-y-3">
+                  {chunkProposal.assignments.map((item) => {
+                    const id = `assignment-${item.trackId}`;
+                    const state = itemStatus[id];
+                    return (
+                      <div 
+                        key={id} 
+                        className={`flex items-center justify-between rounded-xl border p-4 transition-all duration-300 ${
+                          state === 'approved' ? 'border-[#1DB954] bg-[#1DB954]/10 shadow-lg shadow-[#1DB954]/5' : 
+                          state === 'rejected' ? 'border-zinc-800 bg-zinc-900/30 opacity-50 grayscale' : 
+                          'border-zinc-800 bg-[#181818] hover:bg-[#202020]'
+                        }`}
+                      >
+                        <div className="flex-1 pr-4">
+                          <p className="font-bold text-white text-base">{item.trackName}</p>
+                          <p className="text-sm text-zinc-400 mt-0.5">{item.artistNames.join(", ")}</p>
+                          <div className="mt-3 flex items-center gap-2">
+                            <span className="text-xs font-medium text-zinc-500 uppercase tracking-wider">Target Playlist:</span>
+                            <span className="text-sm font-bold text-[#1DB954] bg-[#1DB954]/10 px-2.5 py-0.5 rounded-full">{item.targetPlaylistName}</span>
+                          </div>
+                          <p className="text-xs text-zinc-500 mt-2 italic">{item.reason}</p>
+                        </div>
+                        <div className="flex flex-col gap-2 border-l border-zinc-800 pl-4 py-1">
+                          <button
+                            onClick={() => setItemStatus(prev => ({ ...prev, [id]: 'approved' }))}
+                            className={`p-2.5 rounded-full transition-all duration-200 ${state === 'approved' ? 'bg-[#1DB954] text-black shadow-md scale-110' : 'bg-zinc-800 text-zinc-400 hover:text-white hover:bg-zinc-700'}`}
+                            title="Approve"
+                          >
+                            <CheckIcon />
+                          </button>
+                          <button
+                            onClick={() => setItemStatus(prev => ({ ...prev, [id]: 'rejected' }))}
+                            className={`p-2.5 rounded-full transition-all duration-200 ${state === 'rejected' ? 'bg-red-500 text-white shadow-md scale-110' : 'bg-zinc-800 text-zinc-400 hover:text-white hover:bg-zinc-700'}`}
+                            title="Skip / Reject"
+                          >
+                            <XIcon />
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </article>
+            )}
+
+            {/* Task B: New Playlists */}
+            {chunkProposal.newPlaylists.length > 0 && (
+              <article>
+                <h2 className="text-xl font-bold text-white mb-4 px-2 mt-8">Task B: New Playlist Suggestions</h2>
+                <div className="space-y-3">
+                  {chunkProposal.newPlaylists.map((item) => {
+                    const id = `newPlaylist-${item.name}`;
+                    const state = itemStatus[id];
+                    return (
+                      <div 
+                        key={id} 
+                        className={`flex items-center justify-between rounded-xl border p-4 transition-all duration-300 ${
+                          state === 'approved' ? 'border-[#1DB954] bg-[#1DB954]/10 shadow-lg shadow-[#1DB954]/5' : 
+                          state === 'rejected' ? 'border-zinc-800 bg-zinc-900/30 opacity-50 grayscale' : 
+                          'border-zinc-800 bg-[#181818] hover:bg-[#202020]'
+                        }`}
+                      >
+                        <div className="flex-1 pr-4">
+                          <p className="font-bold text-white text-base">{item.name}</p>
+                          <p className="text-sm text-zinc-400 mt-1">{item.description || "No description provided"}</p>
+                          <p className="mt-3 text-xs font-medium text-zinc-500 uppercase tracking-wider">
+                            Contains <span className="text-white bg-zinc-800 px-1.5 py-0.5 rounded ml-1">{item.trackIds.length}</span> Tracks
+                          </p>
+                        </div>
+                        <div className="flex flex-col gap-2 border-l border-zinc-800 pl-4 py-1">
+                          <button
+                            onClick={() => setItemStatus(prev => ({ ...prev, [id]: 'approved' }))}
+                            className={`p-2.5 rounded-full transition-all duration-200 ${state === 'approved' ? 'bg-[#1DB954] text-black shadow-md scale-110' : 'bg-zinc-800 text-zinc-400 hover:text-white hover:bg-zinc-700'}`}
+                            title="Approve"
+                          >
+                            <CheckIcon />
+                          </button>
+                          <button
+                            onClick={() => setItemStatus(prev => ({ ...prev, [id]: 'rejected' }))}
+                            className={`p-2.5 rounded-full transition-all duration-200 ${state === 'rejected' ? 'bg-red-500 text-white shadow-md scale-110' : 'bg-zinc-800 text-zinc-400 hover:text-white hover:bg-zinc-700'}`}
+                            title="Skip / Reject"
+                          >
+                            <XIcon />
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </article>
+            )}
+
+            {/* Task C: Refactors */}
+            {chunkProposal.refactorSuggestions.length > 0 && (
+              <article>
+                <h2 className="text-xl font-bold text-white mb-4 px-2 mt-8">Task C: Playlist Refactor Suggestions</h2>
+                <div className="space-y-3">
+                  {chunkProposal.refactorSuggestions.map((item) => {
+                    const id = `refactor-${item.trackId}`;
+                    const state = itemStatus[id];
+                    return (
+                      <div 
+                        key={id} 
+                        className={`flex items-center justify-between rounded-xl border p-4 transition-all duration-300 ${
+                          state === 'approved' ? 'border-[#1DB954] bg-[#1DB954]/10 shadow-lg shadow-[#1DB954]/5' : 
+                          state === 'rejected' ? 'border-zinc-800 bg-zinc-900/30 opacity-50 grayscale' : 
+                          'border-zinc-800 bg-[#181818] hover:bg-[#202020]'
+                        }`}
+                      >
+                        <div className="flex-1 pr-4">
+                          <p className="font-bold text-white text-base">{item.trackName}</p>
+                          <p className="mt-2 text-sm text-zinc-400">
+                            Move from <span className="font-semibold text-zinc-200">{item.fromPlaylistName}</span> to{" "}
+                            <span className="font-semibold text-[#1DB954] bg-[#1DB954]/10 px-2 py-0.5 rounded-md">{item.toPlaylistName}</span>
+                          </p>
+                          <p className="text-xs text-zinc-500 mt-2 italic">{item.reason}</p>
+                        </div>
+                        <div className="flex flex-col gap-2 border-l border-zinc-800 pl-4 py-1">
+                          <button
+                            onClick={() => setItemStatus(prev => ({ ...prev, [id]: 'approved' }))}
+                            className={`p-2.5 rounded-full transition-all duration-200 ${state === 'approved' ? 'bg-[#1DB954] text-black shadow-md scale-110' : 'bg-zinc-800 text-zinc-400 hover:text-white hover:bg-zinc-700'}`}
+                            title="Approve"
+                          >
+                            <CheckIcon />
+                          </button>
+                          <button
+                            onClick={() => setItemStatus(prev => ({ ...prev, [id]: 'rejected' }))}
+                            className={`p-2.5 rounded-full transition-all duration-200 ${state === 'rejected' ? 'bg-red-500 text-white shadow-md scale-110' : 'bg-zinc-800 text-zinc-400 hover:text-white hover:bg-zinc-700'}`}
+                            title="Skip / Reject"
+                          >
+                            <XIcon />
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </article>
+            )}
+            
+          </section>
+        ) : library && currentChunkIndex < totalChunks ? (
+          <section className="rounded-2xl border border-zinc-800 bg-[#181818] p-12 text-center shadow-xl">
+            <div className="inline-flex items-center justify-center w-16 h-16 rounded-full bg-[#1DB954]/20 text-[#1DB954] mb-4">
+              <svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg>
+            </div>
+            <p className="text-xl font-bold text-white">Ready to analyze chunk {currentChunkIndex + 1} of {totalChunks}.</p>
+            <p className="mt-2 text-sm text-zinc-400">Click &quot;Process Next 50 Songs&quot; above to generate AI suggestions.</p>
+          </section>
+        ) : null}
+      </div>
     </div>
   );
 }
