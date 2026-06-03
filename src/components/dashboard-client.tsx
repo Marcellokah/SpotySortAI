@@ -21,6 +21,7 @@ export function DashboardClient() {
   const { data: session, status } = useSession();
   const [data, setData] = useState<SortApiResponse | null>(null);
   const [loading, setLoading] = useState(false);
+  const [progress, setProgress] = useState<{ current: number; total: number } | null>(null);
   const [executing, setExecuting] = useState(false);
   const [removeFromLiked, setRemoveFromLiked] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
@@ -31,43 +32,155 @@ export function DashboardClient() {
     try {
       setLoading(true);
       setMessage(null);
+      setProgress(null);
+      setData(null);
 
       const libraryResponse = await fetch("/api/spotify/library", {
         method: "GET"
       });
 
-      const libraryJson = (await libraryResponse.json()) as LibraryApiResponse | { error: string };
+      let libraryJson;
+      try {
+        libraryJson = await libraryResponse.json();
+      } catch (e) {
+        throw new Error(`Failed to parse library response. Server returned ${libraryResponse.status} ${libraryResponse.statusText}`);
+      }
 
       if (!libraryResponse.ok) {
-        throw new Error("error" in libraryJson ? libraryJson.error : "Failed to load Spotify library");
+        throw new Error(libraryJson?.error || "Failed to load Spotify library");
       }
 
-      const response = await fetch("/api/ai/sort", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json"
-        },
-        body: JSON.stringify({ library: libraryJson as LibraryApiResponse })
-      });
+      const payload = libraryJson as LibraryApiResponse;
+      
+      const existingPlaylists = payload.playlists.map(p => ({
+        id: p.id,
+        name: p.name,
+      }));
 
-      const json = (await response.json()) as SortApiResponse | { error: string };
+      const likedSongs = payload.likedSongs.map(t => ({
+        trackId: t.id,
+        title: t.name,
+        artistName: t.artists.map((a) => a.name).join(", "),
+      }));
 
-      if (!response.ok) {
-        throw new Error("error" in json ? json.error : "Failed to load sorting proposal");
+      const CHUNK_SIZE = 50;
+      const totalChunks = Math.ceil(likedSongs.length / CHUNK_SIZE);
+      
+      const trackMap = new Map(payload.likedSongs.map((t) => [t.id, t]));
+      const playlistMap = new Map(payload.playlists.map((p) => [p.id, p]));
+
+      const accumulatedProposal: AiSortResponse = {
+        summary: "Analysis in progress...",
+        assignments: [],
+        newPlaylists: [],
+        refactorSuggestions: [],
+      };
+      
+      const newPlaylistsMap: Record<string, string[]> = {};
+
+      for (let i = 0; i < totalChunks; i++) {
+        setProgress({ current: i + 1, total: totalChunks });
+        const chunk = likedSongs.slice(i * CHUNK_SIZE, (i + 1) * CHUNK_SIZE);
+
+        try {
+          const response = await fetch("/api/ai/sort", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json"
+            },
+            body: JSON.stringify({ playlists: existingPlaylists, tracksChunk: chunk })
+          });
+
+          let json;
+          try {
+            json = await response.json();
+          } catch (e) {
+            throw new Error(`The AI sorting process failed or timed out for chunk ${i + 1}. (HTTP ${response.status})`);
+          }
+
+          if (!response.ok) {
+            throw new Error(json?.error || `Failed to sort chunk ${i + 1} (${response.status})`);
+          }
+
+          if (!json.data) {
+            throw new Error(`Invalid response format from AI sort endpoint for chunk ${i + 1}`);
+          }
+
+          const sortedChunk = json.data as { trackId: string, targetPlaylistId: string | null, suggestedNewPlaylistName: string | null }[];
+
+          for (const item of sortedChunk) {
+            const track = trackMap.get(item.trackId);
+            if (!track) continue;
+
+            if (item.targetPlaylistId) {
+              const playlist = playlistMap.get(item.targetPlaylistId);
+              if (playlist) {
+                accumulatedProposal.assignments.push({
+                  trackId: item.trackId,
+                  trackName: track.name,
+                  artistNames: track.artists.map(a => a.name),
+                  targetPlaylistId: item.targetPlaylistId,
+                  targetPlaylistName: playlist.name,
+                  reason: "Matches playlist style",
+                  action: "add_to_existing",
+                });
+              }
+            } else if (item.suggestedNewPlaylistName) {
+              accumulatedProposal.assignments.push({
+                trackId: item.trackId,
+                trackName: track.name,
+                artistNames: track.artists.map(a => a.name),
+                targetPlaylistName: item.suggestedNewPlaylistName,
+                reason: "Fits new suggested playlist",
+                action: "create_new_playlist",
+              });
+
+              if (!newPlaylistsMap[item.suggestedNewPlaylistName]) {
+                newPlaylistsMap[item.suggestedNewPlaylistName] = [];
+              }
+              newPlaylistsMap[item.suggestedNewPlaylistName].push(item.trackId);
+            }
+          }
+
+          accumulatedProposal.newPlaylists = Object.entries(newPlaylistsMap).map(([name, trackIds]) => ({
+            name,
+            description: "AI Generated Playlist",
+            trackIds,
+          }));
+
+          accumulatedProposal.summary = `Analyzed ${Math.min((i + 1) * CHUNK_SIZE, likedSongs.length)} of ${likedSongs.length} tracks.`;
+
+          setData({
+            library: payload,
+            proposal: { ...accumulatedProposal }
+          });
+
+        } catch (chunkError) {
+          console.error(`Error processing chunk ${i + 1}:`, chunkError);
+          setMessage(`Error processing chunk ${i + 1}: ${chunkError instanceof Error ? chunkError.message : "Unknown error"}. Showing results analyzed so far.`);
+          break; // Stop further processing, but keep data
+        }
       }
 
-      setData(json as SortApiResponse);
+      if (accumulatedProposal.assignments.length > 0) {
+        accumulatedProposal.summary = `Finished analyzing. Sorted into ${accumulatedProposal.assignments.filter(a => a.action === 'add_to_existing').length} existing playlist assignments and ${accumulatedProposal.newPlaylists.length} new playlists.`;
+        setData({
+          library: payload,
+          proposal: { ...accumulatedProposal }
+        });
+      }
 
-      const payload = libraryJson as MusicLibraryPayload;
       const warnings = Array.isArray(payload.warnings) ? payload.warnings : [];
 
       if (warnings.length > 0) {
-        setMessage(warnings.join(" \n"));
+        setMessage(prev => prev ? `${prev} \n${warnings.join(" \n")}` : warnings.join(" \n"));
       }
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : "Failed to load sorting proposal");
+      console.error("fetchProposal error:", error);
+      setMessage(error instanceof Error ? error.message : "An unexpected error occurred during analysis.");
     } finally {
       setLoading(false);
+      setProgress(null);
     }
   }, []);
 
@@ -160,7 +273,7 @@ export function DashboardClient() {
             disabled={loading || executing}
             className="rounded-full bg-brand-700 px-4 py-2 font-semibold text-white disabled:opacity-60"
           >
-            {loading ? "Analyzing..." : "Analyze Library"}
+            {loading ? (progress ? `Analyzing chunk ${progress.current} of ${progress.total}...` : "Loading Library...") : "Analyze Library"}
           </button>
           <label className="inline-flex items-center gap-2 rounded-full border border-slate-300 px-4 py-2 text-sm font-medium text-slate-700">
             <input
@@ -181,6 +294,14 @@ export function DashboardClient() {
             <p className="text-sm uppercase tracking-[0.2em] text-brand-700">Summary</p>
             <p className="mt-2 text-slate-800">{data.proposal.summary}</p>
             <p className="mt-2 text-sm text-slate-500">Total suggestions: {totalSuggestions}</p>
+            {loading && (
+              <div className="mt-4 h-2 w-full overflow-hidden rounded-full bg-slate-100">
+                <div 
+                  className="h-full bg-brand-600 transition-all duration-300"
+                  style={{ width: `${progress ? (progress.current / progress.total) * 100 : 0}%` }}
+                />
+              </div>
+            )}
           </article>
 
           <article className="rounded-2xl border border-slate-200 bg-white p-6 shadow">
@@ -205,7 +326,7 @@ export function DashboardClient() {
                 </div>
               ))}
               {data.proposal.assignments.length === 0 ? (
-                <p className="text-sm text-slate-500">No sorting suggestions generated.</p>
+                <p className="text-sm text-slate-500">No sorting suggestions generated yet.</p>
               ) : null}
             </div>
           </article>
@@ -229,7 +350,7 @@ export function DashboardClient() {
                 </div>
               ))}
               {data.proposal.newPlaylists.length === 0 ? (
-                <p className="text-sm text-slate-500">No new playlist suggestions generated.</p>
+                <p className="text-sm text-slate-500">No new playlist suggestions generated yet.</p>
               ) : null}
             </div>
           </article>
@@ -278,7 +399,7 @@ export function DashboardClient() {
                   refactorSuggestions: data.proposal.refactorSuggestions
                 })
               }
-              disabled={executing}
+              disabled={executing || loading}
               className="mt-4 rounded-full bg-slate-900 px-5 py-2 font-semibold text-white disabled:opacity-60"
             >
               {executing ? "Applying..." : "Approve All Suggestions"}

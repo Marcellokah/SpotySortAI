@@ -1,10 +1,10 @@
 import { authOptions } from "@/lib/auth";
-import { getAllLikedTracks, getAllUserOwnedPlaylists, getCurrentUserProfile } from "@/lib/spotify";
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import { getServerSession } from "next-auth/next";
 import { NextRequest, NextResponse } from "next/server";
 
 export const dynamic = "force-dynamic";
+export const maxDuration = 60; // Attempt to increase Vercel max duration (works on Pro, ignored on Hobby)
 
 type SortResult = {
   trackId: string;
@@ -13,7 +13,6 @@ type SortResult = {
 };
 
 function parseModelJson(text: string): SortResult[] {
-  // Clean potential markdown blocks surrounding JSON
   const cleaned = text
     .replace(/^```json\s*/i, "")
     .replace(/^```\s*/i, "")
@@ -43,34 +42,17 @@ export async function POST(request: NextRequest) {
   }
 
   try {
-    // We only need the user's ID, existing playlists, and liked songs.
-    // Fetch directly to avoid aggressive parallel track fetching of buildMusicLibrary.
-    const userId = session.userId || (await getCurrentUserProfile(session.accessToken)).id;
-    
-    const rawPlaylists = await getAllUserOwnedPlaylists(session.accessToken, userId);
-    
-    // 1. Format existing strictly owned playlists
-    const existingPlaylists = rawPlaylists.map((p) => ({
-        id: p.id,
-        name: p.name,
-    }));
+    const { playlists, tracksChunk } = await request.json();
 
-    const rawLikedSongs = await getAllLikedTracks(session.accessToken);
+    if (!playlists || !tracksChunk || !Array.isArray(tracksChunk)) {
+      return NextResponse.json({ error: "Invalid payload format" }, { status: 400 });
+    }
 
-    // 2. Format liked songs
-    const likedSongs = rawLikedSongs.map((t) => ({
-      trackId: t.id,
-      title: t.name,
-      artistName: t.artists.map((a) => a.name).join(", "),
-    }));
-
-    // 3. Create bulk payload
     const payload = {
-      existingPlaylists,
-      likedSongs,
+      existingPlaylists: playlists,
+      likedSongs: tracksChunk,
     };
 
-    // 4. Construct the prompt with specific JSON array instructions
     const prompt = [
       "You are a music curator assistant.",
       "Sort the provided 'likedSongs' into the 'existingPlaylists'.",
@@ -89,26 +71,19 @@ export async function POST(request: NextRequest) {
     ].join("\n");
 
     const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-    
-    // 5. Use gemini-2.5-flash for massive context capability
-    const model = genAI.getGenerativeModel({
-      model: "gemini-2.5-flash"
-    });
+    const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
 
     const result = await model.generateContent({
       contents: [{ role: "user", parts: [{ text: prompt }] }],
-      generationConfig: {
-        // Enforce JSON MIME type
-        responseMimeType: "application/json"
-      }
+      generationConfig: { responseMimeType: "application/json" }
     });
 
     const responseText = result.response.text();
-    const sortedTracks = parseModelJson(responseText);
+    const sortedChunk = parseModelJson(responseText);
 
     return NextResponse.json({
       success: true,
-      data: sortedTracks,
+      data: sortedChunk,
     });
   } catch (error) {
     console.error("Sort route error:", error);
