@@ -11,13 +11,13 @@ type LibraryApiResponse = MusicLibraryPayload;
 type ItemState = "pending" | "approved" | "rejected";
 
 const CheckIcon = () => (
-  <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+  <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
     <polyline points="20 6 9 17 4 12" />
   </svg>
 );
 
 const XIcon = () => (
-  <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+  <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
     <line x1="18" y1="6" x2="6" y2="18" />
     <line x1="6" y1="6" x2="18" y2="18" />
   </svg>
@@ -418,7 +418,13 @@ export function DashboardClient() {
               <span className="text-zinc-300 tracking-wide uppercase text-xs sm:text-sm">Global Progress</span>
               <span className="text-zinc-400">Processed: <span className="text-white">{processedCount}</span> / {totalSongsCount} Liked Songs</span>
             </div>
-            <div className="h-3 w-full bg-zinc-800 rounded-full overflow-hidden">
+            <div 
+              className="h-3 w-full bg-zinc-800 rounded-full overflow-hidden"
+              role="progressbar"
+              aria-valuenow={processedCount}
+              aria-valuemin={0}
+              aria-valuemax={totalSongsCount}
+            >
               <div 
                 className="h-full bg-[#1DB954] transition-all duration-700 ease-out"
                 style={{ width: `${totalSongsCount > 0 ? (processedCount / totalSongsCount) * 100 : 0}%` }}
@@ -428,7 +434,10 @@ export function DashboardClient() {
         )}
 
         {message ? (
-          <div className="rounded-xl border border-zinc-700 bg-zinc-800 p-4 text-sm text-zinc-200 shadow-lg break-words">
+          <div 
+            className="rounded-xl border border-zinc-700 bg-zinc-800 p-4 text-sm text-zinc-200 shadow-lg break-words"
+            aria-live="polite"
+          >
             {message}
           </div>
         ) : null}
@@ -480,6 +489,7 @@ export function DashboardClient() {
                             onClick={() => setItemStatus(prev => ({ ...prev, [id]: 'approved' }))}
                             className={`flex items-center justify-center h-12 w-12 md:h-10 md:w-10 rounded-full transition-all duration-200 ${state === 'approved' ? 'bg-[#1DB954] text-black shadow-md md:scale-110' : 'bg-zinc-800 text-zinc-400 hover:text-white hover:bg-zinc-700'}`}
                             title="Approve"
+                            aria-label="Approve"
                           >
                             <CheckIcon />
                           </button>
@@ -487,6 +497,7 @@ export function DashboardClient() {
                             onClick={() => setItemStatus(prev => ({ ...prev, [id]: 'rejected' }))}
                             className={`flex items-center justify-center h-12 w-12 md:h-10 md:w-10 rounded-full transition-all duration-200 ${state === 'rejected' ? 'bg-red-500 text-white shadow-md md:scale-110' : 'bg-zinc-800 text-zinc-400 hover:text-white hover:bg-zinc-700'}`}
                             title="Skip / Reject"
+                            aria-label="Skip / Reject"
                           >
                             <XIcon />
                           </button>
@@ -527,6 +538,7 @@ export function DashboardClient() {
                             onClick={() => setItemStatus(prev => ({ ...prev, [id]: 'approved' }))}
                             className={`flex items-center justify-center h-12 w-12 md:h-10 md:w-10 rounded-full transition-all duration-200 ${state === 'approved' ? 'bg-[#1DB954] text-black shadow-md md:scale-110' : 'bg-zinc-800 text-zinc-400 hover:text-white hover:bg-zinc-700'}`}
                             title="Approve"
+                            aria-label="Approve"
                           >
                             <CheckIcon />
                           </button>
@@ -534,6 +546,7 @@ export function DashboardClient() {
                             onClick={() => setItemStatus(prev => ({ ...prev, [id]: 'rejected' }))}
                             className={`flex items-center justify-center h-12 w-12 md:h-10 md:w-10 rounded-full transition-all duration-200 ${state === 'rejected' ? 'bg-red-500 text-white shadow-md md:scale-110' : 'bg-zinc-800 text-zinc-400 hover:text-white hover:bg-zinc-700'}`}
                             title="Skip / Reject"
+                            aria-label="Skip / Reject"
                           >
                             <XIcon />
                           </button>
@@ -575,6 +588,7 @@ export function DashboardClient() {
                             onClick={() => setItemStatus(prev => ({ ...prev, [id]: 'approved' }))}
                             className={`flex items-center justify-center h-12 w-12 md:h-10 md:w-10 rounded-full transition-all duration-200 ${state === 'approved' ? 'bg-[#1DB954] text-black shadow-md md:scale-110' : 'bg-zinc-800 text-zinc-400 hover:text-white hover:bg-zinc-700'}`}
                             title="Approve"
+                            aria-label="Approve"
                           >
                             <CheckIcon />
                           </button>
@@ -582,6 +596,7 @@ export function DashboardClient() {
                             onClick={() => setItemStatus(prev => ({ ...prev, [id]: 'rejected' }))}
                             className={`flex items-center justify-center h-12 w-12 md:h-10 md:w-10 rounded-full transition-all duration-200 ${state === 'rejected' ? 'bg-red-500 text-white shadow-md md:scale-110' : 'bg-zinc-800 text-zinc-400 hover:text-white hover:bg-zinc-700'}`}
                             title="Skip / Reject"
+                            aria-label="Skip / Reject"
                           >
                             <XIcon />
                           </button>
