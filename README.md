@@ -14,7 +14,7 @@ A Next.js App Router application that connects to Spotify, analyzes your liked s
 - Tailwind CSS
 - NextAuth.js (Spotify OAuth)
 - Spotify Web API
-- Google Gemini API (`gemini-1.5-pro`)
+- Google Gemini API (`gemini-2.5-flash`)
 
 ## Environment variables
 

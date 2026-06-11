@@ -1,11 +1,8 @@
 "use client";
 
 import {
-  AiAssignment,
   AiSortResponse,
-  MusicLibraryPayload,
-  NewPlaylistSuggestion,
-  RefactorSuggestion
+  MusicLibraryPayload
 } from "@/lib/types";
 import { signIn, signOut, useSession } from "next-auth/react";
 import { useCallback, useMemo, useState } from "react";
@@ -63,7 +60,7 @@ export function DashboardClient() {
       let libraryJson;
       try {
         libraryJson = await libraryResponse.json();
-      } catch (e) {
+      } catch {
         throw new Error(`Failed to parse library response. Server returned ${libraryResponse.status}`);
       }
 
@@ -131,7 +128,7 @@ export function DashboardClient() {
       let json;
       try {
         json = await response.json();
-      } catch (e) {
+      } catch {
         throw new Error(`The AI sorting process failed. (HTTP ${response.status})`);
       }
 
@@ -213,6 +210,32 @@ export function DashboardClient() {
     }
   }, [library, currentChunkIndex, totalChunks]);
 
+  // Helper to remove approved and rejected items from the list, leaving only pending
+  const filterExecutedItems = useCallback(() => {
+    setChunkProposal(prev => {
+      if (!prev) return null;
+      
+      const newAssignments = prev.assignments.filter(a => itemStatus[`assignment-${a.trackId}`] === 'pending');
+      const newPlaylistsList = prev.newPlaylists.filter(p => itemStatus[`newPlaylist-${p.name}`] === 'pending');
+      const newRefactors = prev.refactorSuggestions.filter(r => itemStatus[`refactor-${r.trackId}`] === 'pending');
+
+      const totalPending = newAssignments.length + newPlaylistsList.length + newRefactors.length;
+
+      if (totalPending === 0) {
+        // If everything is handled, clear proposal and advance to next chunk
+        setCurrentChunkIndex(idx => idx + 1);
+        return null;
+      }
+
+      return {
+        ...prev,
+        assignments: newAssignments,
+        newPlaylists: newPlaylistsList,
+        refactorSuggestions: newRefactors,
+      };
+    });
+  }, [itemStatus]);
+
   const executeApprovedActions = useCallback(async () => {
     if (!chunkProposal) return;
     
@@ -259,33 +282,7 @@ export function DashboardClient() {
     } finally {
       setExecuting(false);
     }
-  }, [chunkProposal, itemStatus, removeFromLiked]);
-
-  // Helper to remove approved and rejected items from the list, leaving only pending
-  const filterExecutedItems = () => {
-    setChunkProposal(prev => {
-      if (!prev) return null;
-      
-      const newAssignments = prev.assignments.filter(a => itemStatus[`assignment-${a.trackId}`] === 'pending');
-      const newPlaylistsList = prev.newPlaylists.filter(p => itemStatus[`newPlaylist-${p.name}`] === 'pending');
-      const newRefactors = prev.refactorSuggestions.filter(r => itemStatus[`refactor-${r.trackId}`] === 'pending');
-
-      const totalPending = newAssignments.length + newPlaylistsList.length + newRefactors.length;
-
-      if (totalPending === 0) {
-        // If everything is handled, clear proposal and advance to next chunk
-        setCurrentChunkIndex(idx => idx + 1);
-        return null;
-      }
-
-      return {
-        ...prev,
-        assignments: newAssignments,
-        newPlaylists: newPlaylistsList,
-        refactorSuggestions: newRefactors,
-      };
-    });
-  };
+  }, [chunkProposal, itemStatus, removeFromLiked, filterExecutedItems]);
 
   const { approvedCount, rejectedCount, pendingCount } = useMemo(() => {
     let approved = 0;

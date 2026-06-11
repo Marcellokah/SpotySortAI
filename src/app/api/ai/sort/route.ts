@@ -21,7 +21,7 @@ function parseModelJson(text: string): SortResult[] {
 
   try {
     return JSON.parse(cleaned) as SortResult[];
-  } catch (error) {
+  } catch {
     console.error("Failed to parse Gemini response:", cleaned);
     throw new Error("Invalid JSON response from AI");
   }
