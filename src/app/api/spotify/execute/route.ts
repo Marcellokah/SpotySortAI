@@ -93,15 +93,40 @@ export async function POST(request: NextRequest) {
     try {
       for (const [targetPlaylistId, group] of groupMap.entries()) {
         const uniqueGroup = Array.from(new Map(group.map(t => [t.trackId, t])).values());
+        
+        // 1. Pre-flight Check (Fetch existing tracks)
+        let existingUris = new Set<string>();
+        try {
+          const getRes = await fetch(`https://api.spotify.com/v1/playlists/${targetPlaylistId}/tracks?fields=items(track(uri))`, {
+            headers: { Authorization: `Bearer ${token}` },
+            cache: 'no-store'
+          });
+          
+          if (!getRes.ok) {
+             console.warn(`Pre-flight check failed, proceeding without deduplication. Status: ${getRes.status}`);
+          } else {
+            const currentTracks = await getRes.json();
+            existingUris = new Set(currentTracks.items?.map((item: any) => item.track?.uri) || []);
+          }
+        } catch (error) {
+          console.warn("Pre-flight check failed, proceeding without deduplication:", error);
+        }
 
         for (let i = 0; i < uniqueGroup.length; i += 100) {
           const chunk = uniqueGroup.slice(i, i + 100);
           
-          // 2. Strict Spotify URI Formatting
+          // 2. Strict Spotify URI Formatting & Deduplication
           const uris = chunk.map((t) => "spotify:track:" + t.trackId);
+          const uniqueIncomingUris = [...new Set(uris)];
+          const urisToInsert = uniqueIncomingUris.filter(uri => !existingUris.has(uri));
+
+          if (urisToInsert.length === 0) {
+            console.log(`Skipping playlist ${targetPlaylistId}, chunk ${i / 100 + 1}, all tracks already exist.`);
+            continue;
+          }
 
           // 4. Console Validation
-          console.log("SENDING TO SPOTIFY Playlist:", targetPlaylistId, "Payload:", JSON.stringify({ uris }));
+          console.log("SENDING TO SPOTIFY Playlist:", targetPlaylistId, "Payload:", JSON.stringify({ uris: urisToInsert }));
 
           // 3. The Fetch Call
           const res = await fetch("https://api.spotify.com/v1/playlists/" + targetPlaylistId + "/items", {
@@ -110,7 +135,7 @@ export async function POST(request: NextRequest) {
               Authorization: "Bearer " + token,
               "Content-Type": "application/json"
             },
-            body: JSON.stringify({ uris })
+            body: JSON.stringify({ uris: urisToInsert })
           });
 
           if (!res.ok) {
