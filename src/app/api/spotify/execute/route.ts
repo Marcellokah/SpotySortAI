@@ -11,75 +11,6 @@ type ExecuteBody = {
   removeFromLiked?: boolean;
 };
 
-function toTrackUris(trackIds: string[]) {
-  return trackIds.map((id) => {
-    const cleanId = id.replace(/^spotify:track:/, "");
-    return `spotify:track:${cleanId}`;
-  });
-}
-
-async function addTracksInChunks(
-  accessToken: string,
-  playlistId: string,
-  trackIds: string[]
-): Promise<void> {
-  const uniqueTrackIds = Array.from(new Set(trackIds.filter(Boolean)));
-
-  for (let i = 0; i < uniqueTrackIds.length; i += 100) {
-    const chunk = uniqueTrackIds.slice(i, i + 100);
-    const uris = toTrackUris(chunk);
-    const payload = JSON.stringify({ uris });
-    const url = `https://api.spotify.com/v1/playlists/${playlistId}/tracks`;
-
-    console.log(`[Spotify API] POST ${url}`);
-    console.log(`[Spotify API] Payload: ${payload}`);
-
-    const response = await fetch(url, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${accessToken}`,
-        "Content-Type": "application/json"
-      },
-      body: payload
-    });
-
-    if (!response.ok) {
-      const errorText = await response.text();
-      console.error(`[Spotify API Error] POST ${url} | Status: ${response.status} | Response: ${errorText}`);
-      throw new Error(`Failed to add tracks: ${response.status} ${errorText}`);
-    }
-  }
-}
-
-async function removeLikedTracks(accessToken: string, trackIds: string[]): Promise<void> {
-  const cleanedIds = trackIds.map((id) => id.replace(/^spotify:track:/, ""));
-  const uniqueTrackIds = Array.from(new Set(cleanedIds.filter(Boolean)));
-
-  for (let i = 0; i < uniqueTrackIds.length; i += 50) {
-    const chunk = uniqueTrackIds.slice(i, i + 50);
-    const payload = JSON.stringify({ ids: chunk });
-    const url = "https://api.spotify.com/v1/me/tracks";
-
-    console.log(`[Spotify API] DELETE ${url}`);
-    console.log(`[Spotify API] Payload: ${payload}`);
-
-    const response = await fetch(url, {
-      method: "DELETE",
-      headers: {
-        Authorization: `Bearer ${accessToken}`,
-        "Content-Type": "application/json"
-      },
-      body: payload
-    });
-
-    if (!response.ok) {
-      const errorText = await response.text();
-      console.error(`[Spotify API Error] DELETE ${url} | Status: ${response.status} | Response: ${errorText}`);
-      throw new Error(`Failed to remove liked tracks: ${response.status} ${errorText}`);
-    }
-  }
-}
-
 export async function POST(request: NextRequest) {
   const session = await getServerSession(authOptions);
 
@@ -87,21 +18,38 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
+  const token = session.accessToken;
+
   try {
     const body = (await request.json()) as ExecuteBody;
     const assignments = body.assignments ?? [];
     const newPlaylists = body.newPlaylists ?? [];
     const refactorSuggestions = body.refactorSuggestions ?? [];
+    const removeFromLiked = body.removeFromLiked ?? false;
 
-    const profile = await getCurrentUserProfile(session.accessToken);
+    const profile = await getCurrentUserProfile(token);
 
+    // 1. Parse and Group Correctly:
+    // Extract `assignments` from `req.body`.
+    // Group the `trackId`s by `targetPlaylistId` (only for `action === 'add_to_existing'`).
+    const groupMap = new Map<string, Array<{ trackId: string }>>();
+
+    for (const assignment of assignments) {
+      if (assignment.action === "add_to_existing" && assignment.targetPlaylistId) {
+        const group = groupMap.get(assignment.targetPlaylistId) ?? [];
+        group.push({ trackId: assignment.trackId.replace(/^spotify:track:/, "") });
+        groupMap.set(assignment.targetPlaylistId, group);
+      }
+    }
+
+    // Handle newPlaylists and refactorSuggestions
     const createdPlaylistIdsByName = new Map<string, string>();
 
     for (const playlist of newPlaylists) {
       if (!playlist.name) continue;
 
       const created = await spotifyApiWrite<{ id: string }>(
-        session.accessToken,
+        token,
         `https://api.spotify.com/v1/users/${profile.id}/playlists`,
         "POST",
         {
@@ -114,49 +62,99 @@ export async function POST(request: NextRequest) {
       createdPlaylistIdsByName.set(playlist.name, created.id);
 
       if (playlist.trackIds.length > 0) {
-        try {
-          await addTracksInChunks(session.accessToken, created.id, playlist.trackIds);
-        } catch (error) {
-          console.error(`[Execution] Failed to add tracks to new playlist ${playlist.name}:`, error);
-          throw error;
+        const group = groupMap.get(created.id) ?? [];
+        for (const trackId of playlist.trackIds) {
+          group.push({ trackId: trackId.replace(/^spotify:track:/, "") });
+        }
+        groupMap.set(created.id, group);
+      }
+    }
+
+    for (const assignment of assignments) {
+      if (assignment.action === "create_new" && assignment.targetPlaylistName) {
+        const playlistId = createdPlaylistIdsByName.get(assignment.targetPlaylistName);
+        if (playlistId) {
+          const group = groupMap.get(playlistId) ?? [];
+          group.push({ trackId: assignment.trackId.replace(/^spotify:track:/, "") });
+          groupMap.set(playlistId, group);
         }
       }
     }
 
-    const tracksByPlaylist = new Map<string, string[]>();
-
-    for (const assignment of assignments) {
-      const playlistId =
-        assignment.action === "add_to_existing"
-          ? assignment.targetPlaylistId
-          : createdPlaylistIdsByName.get(assignment.targetPlaylistName);
-
-      if (!playlistId) continue;
-
-      const current = tracksByPlaylist.get(playlistId) ?? [];
-      current.push(assignment.trackId);
-      tracksByPlaylist.set(playlistId, current);
-    }
-
     for (const suggestion of refactorSuggestions) {
-      const current = tracksByPlaylist.get(suggestion.toPlaylistId) ?? [];
-      current.push(suggestion.trackId);
-      tracksByPlaylist.set(suggestion.toPlaylistId, current);
+      if (suggestion.toPlaylistId) {
+        const group = groupMap.get(suggestion.toPlaylistId) ?? [];
+        group.push({ trackId: suggestion.trackId.replace(/^spotify:track:/, "") });
+        groupMap.set(suggestion.toPlaylistId, group);
+      }
     }
 
+    // Playlist POST(s)
     try {
-      for (const [playlistId, trackIds] of tracksByPlaylist.entries()) {
-        await addTracksInChunks(session.accessToken, playlistId, trackIds);
+      for (const [targetPlaylistId, group] of groupMap.entries()) {
+        const uniqueGroup = Array.from(new Map(group.map(t => [t.trackId, t])).values());
+
+        for (let i = 0; i < uniqueGroup.length; i += 100) {
+          const chunk = uniqueGroup.slice(i, i + 100);
+          
+          // 2. Strict Spotify URI Formatting
+          const uris = chunk.map((t) => "spotify:track:" + t.trackId);
+
+          // 4. Console Validation
+          console.log("SENDING TO SPOTIFY Playlist:", targetPlaylistId, "Payload:", JSON.stringify({ uris }));
+
+          // 3. The Fetch Call
+          const res = await fetch("https://api.spotify.com/v1/playlists/" + targetPlaylistId + "/items", {
+            method: 'POST',
+            headers: {
+              Authorization: "Bearer " + token,
+              "Content-Type": "application/json"
+            },
+            body: JSON.stringify({ uris })
+          });
+
+          if (!res.ok) {
+            const errorText = await res.text();
+            console.error(`[Spotify API Error] POST https://api.spotify.com/v1/playlists/${targetPlaylistId}/tracks | Status: ${res.status} | Response: ${errorText}`);
+            throw new Error(`Failed to add tracks: ${res.status} ${errorText}`);
+          }
+        }
       }
     } catch (error) {
       console.error("[Execution] Playlist POST error:", error);
       throw error;
     }
 
-    if (body.removeFromLiked) {
+    // Liked Songs DELETE
+    if (removeFromLiked && assignments.length > 0) {
       try {
-        const movedFromLikedIds = assignments.map((item) => item.trackId);
-        await removeLikedTracks(session.accessToken, movedFromLikedIds);
+        const movedFromLikedIds = Array.from(
+          new Set(assignments.map((item) => item.trackId.replace(/^spotify:track:/, "")))
+        );
+
+        for (let i = 0; i < movedFromLikedIds.length; i += 50) {
+          const chunk = movedFromLikedIds.slice(i, i + 50);
+          const payload = JSON.stringify({ ids: chunk });
+          const url = "https://api.spotify.com/v1/me/tracks";
+
+          console.log(`[Spotify API] DELETE ${url}`);
+          console.log(`[Spotify API] Payload: ${payload}`);
+
+          const response = await fetch(url, {
+            method: "DELETE",
+            headers: {
+              Authorization: `Bearer ${token}`,
+              "Content-Type": "application/json"
+            },
+            body: payload
+          });
+
+          if (!response.ok) {
+            const errorText = await response.text();
+            console.error(`[Spotify API Error] DELETE ${url} | Status: ${response.status} | Response: ${errorText}`);
+            throw new Error(`Failed to remove liked tracks: ${response.status} ${errorText}`);
+          }
+        }
       } catch (error) {
         console.error("[Execution] Liked Songs DELETE error:", error);
         throw error;
@@ -169,7 +167,7 @@ export async function POST(request: NextRequest) {
         name,
         id
       })),
-      playlistsUpdated: tracksByPlaylist.size
+      playlistsUpdated: groupMap.size
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Failed to execute Spotify actions";
