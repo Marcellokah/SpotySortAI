@@ -115,7 +115,7 @@ export async function POST(request: NextRequest) {
 
           if (!res.ok) {
             const errorText = await res.text();
-            console.error(`[Spotify API Error] POST https://api.spotify.com/v1/playlists/${targetPlaylistId}/tracks | Status: ${res.status} | Response: ${errorText}`);
+            console.error(`[Spotify API Error] POST https://api.spotify.com/v1/playlists/${targetPlaylistId}/items | Status: ${res.status} | Response: ${errorText}`);
             throw new Error(`Failed to add tracks: ${res.status} ${errorText}`);
           }
         }
@@ -134,25 +134,19 @@ export async function POST(request: NextRequest) {
 
         for (let i = 0; i < movedFromLikedIds.length; i += 50) {
           const chunk = movedFromLikedIds.slice(i, i + 50);
-          const payload = JSON.stringify({ ids: chunk });
-          const url = "https://api.spotify.com/v1/me/tracks";
 
-          console.log(`[Spotify API] DELETE ${url}`);
-          console.log(`[Spotify API] Payload: ${payload}`);
+          const urisParam = chunk.map(id => 'spotify:track:' + id).join(',');
+          console.log("SENDING DELETE TO SPOTIFY URL:", `https://api.spotify.com/v1/me/library?uris=${urisParam}`);
 
-          const response = await fetch(url, {
+          const response = await fetch(`https://api.spotify.com/v1/me/library?uris=${urisParam}`, {
             method: "DELETE",
             headers: {
-              Authorization: `Bearer ${token}`,
-              "Content-Type": "application/json"
-            },
-            body: payload
+              Authorization: `Bearer ${token}`
+            }
           });
 
           if (!response.ok) {
-            const errorText = await response.text();
-            console.error(`[Spotify API Error] DELETE ${url} | Status: ${response.status} | Response: ${errorText}`);
-            throw new Error(`Failed to remove liked tracks: ${response.status} ${errorText}`);
+            throw new Error(`Spotify DELETE Error: ${response.status} - ${await response.text()}`);
           }
         }
       } catch (error) {
