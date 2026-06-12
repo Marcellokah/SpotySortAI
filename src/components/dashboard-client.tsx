@@ -5,7 +5,7 @@ import {
   MusicLibraryPayload
 } from "@/lib/types";
 import { signIn, signOut, useSession } from "next-auth/react";
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
 type LibraryApiResponse = MusicLibraryPayload;
 type ItemState = "pending" | "approved" | "rejected";
@@ -46,6 +46,67 @@ export function DashboardClient() {
   const [message, setMessage] = useState<string | null>(null);
 
   const isLoggedIn = Boolean(session?.accessToken);
+
+  // Hydration state to prevent overwriting localStorage on initial empty render
+  const [isHydrated, setIsHydrated] = useState(false);
+
+  // State Persistence Hooks
+  useEffect(() => {
+    try {
+      const savedLibrary = localStorage.getItem("spotifySorter_library");
+      const savedIndex = localStorage.getItem("spotifySorter_chunkIndex");
+      const savedTotal = localStorage.getItem("spotifySorter_totalChunks");
+      const savedProposal = localStorage.getItem("spotifySorter_chunkProposal");
+      const savedStatus = localStorage.getItem("spotifySorter_itemStatus");
+
+      if (savedLibrary) setLibrary(JSON.parse(savedLibrary));
+      if (savedIndex) setCurrentChunkIndex(Number(savedIndex));
+      if (savedTotal) setTotalChunks(Number(savedTotal));
+      if (savedProposal) setChunkProposal(JSON.parse(savedProposal));
+      if (savedStatus) setItemStatus(JSON.parse(savedStatus));
+    } catch (e) {
+      console.error("Failed to restore state from localStorage", e);
+    } finally {
+      setIsHydrated(true);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!isHydrated) return;
+
+    if (library) localStorage.setItem("spotifySorter_library", JSON.stringify(library));
+    else localStorage.removeItem("spotifySorter_library");
+    
+    localStorage.setItem("spotifySorter_chunkIndex", currentChunkIndex.toString());
+    localStorage.setItem("spotifySorter_totalChunks", totalChunks.toString());
+    
+    if (chunkProposal) localStorage.setItem("spotifySorter_chunkProposal", JSON.stringify(chunkProposal));
+    else localStorage.removeItem("spotifySorter_chunkProposal");
+    
+    if (Object.keys(itemStatus).length > 0) localStorage.setItem("spotifySorter_itemStatus", JSON.stringify(itemStatus));
+    else localStorage.removeItem("spotifySorter_itemStatus");
+  }, [library, currentChunkIndex, totalChunks, chunkProposal, itemStatus, isHydrated]);
+
+  const clearData = useCallback(() => {
+    if (typeof window !== "undefined") {
+      localStorage.removeItem("spotifySorter_library");
+      localStorage.removeItem("spotifySorter_chunkIndex");
+      localStorage.removeItem("spotifySorter_totalChunks");
+      localStorage.removeItem("spotifySorter_chunkProposal");
+      localStorage.removeItem("spotifySorter_itemStatus");
+    }
+    setLibrary(null);
+    setCurrentChunkIndex(0);
+    setTotalChunks(0);
+    setChunkProposal(null);
+    setItemStatus({});
+    setMessage("Progress and cached data cleared.");
+  }, []);
+
+  const handleSignOut = useCallback(() => {
+    clearData();
+    signOut();
+  }, [clearData]);
 
   const loadLibrary = useCallback(async () => {
     try {
@@ -314,7 +375,7 @@ export function DashboardClient() {
     return { approvedCount: approved, rejectedCount: rejected, pendingCount: pending };
   }, [itemStatus, chunkProposal]);
 
-  if (status === "loading") {
+  if (status === "loading" || !isHydrated) {
     return <div className="min-h-screen bg-[#121212] flex items-center justify-center text-zinc-400">Loading session...</div>;
   }
 
@@ -336,8 +397,10 @@ export function DashboardClient() {
     );
   }
 
+  const dynamicTotalChunks = library ? Math.ceil(library.likedSongs.length / CHUNK_SIZE) : 0;
   const processedCount = Math.min(currentChunkIndex * CHUNK_SIZE, library?.likedSongs.length || 0);
   const totalSongsCount = library?.likedSongs.length || 0;
+  const allChunksProcessed = isHydrated && library && library.likedSongs.length > 0 && currentChunkIndex >= dynamicTotalChunks;
 
   return (
     <div className="min-h-screen bg-[#121212] text-white p-4 md:p-6 font-sans">
@@ -350,13 +413,22 @@ export function DashboardClient() {
               <h1 className="text-xl md:text-2xl font-bold text-white">Dashboard</h1>
               <p className="mt-1 text-sm md:text-base text-zinc-400">Step-by-step AI sorting with granular control.</p>
             </div>
-            <button
-              type="button"
-              onClick={() => signOut()}
-              className="rounded-full border border-zinc-700 hover:border-zinc-500 px-4 py-2 text-sm md:text-base font-semibold text-zinc-300 transition-colors"
-            >
-              Sign out
-            </button>
+            <div className="flex gap-2">
+              <button
+                type="button"
+                onClick={clearData}
+                className="rounded-full px-4 py-2 text-sm md:text-base font-semibold text-zinc-400 hover:text-white transition-colors"
+              >
+                Clear Data & Reanalyze
+              </button>
+              <button
+                type="button"
+                onClick={handleSignOut}
+                className="rounded-full border border-zinc-700 hover:border-zinc-500 px-4 py-2 text-sm md:text-base font-semibold text-zinc-300 transition-colors"
+              >
+                Sign out
+              </button>
+            </div>
           </div>
 
           <div className="mt-6 flex flex-col sm:flex-row flex-wrap items-stretch sm:items-center gap-4">
@@ -369,7 +441,7 @@ export function DashboardClient() {
               >
                 {loadingLibrary ? "Loading Library..." : "Fetch Spotify Library"}
               </button>
-            ) : currentChunkIndex < totalChunks ? (
+            ) : !allChunksProcessed ? (
               !chunkProposal ? (
                 <button
                   type="button"
@@ -378,8 +450,8 @@ export function DashboardClient() {
                   className="w-full sm:w-auto rounded-full bg-white hover:bg-zinc-200 px-6 py-3 font-bold text-black disabled:opacity-60 transition-colors shadow-lg"
                 >
                   {analyzing 
-                    ? `Analyzing chunk ${currentChunkIndex + 1} of ${totalChunks}...` 
-                    : `Process Next 50 Songs (Chunk ${currentChunkIndex + 1} of ${totalChunks})`}
+                    ? `Analyzing chunk ${currentChunkIndex + 1} of ${dynamicTotalChunks}...` 
+                    : `Process Next 50 Songs (Chunk ${currentChunkIndex + 1} of ${dynamicTotalChunks})`}
                 </button>
               ) : (
                 <button
@@ -397,7 +469,7 @@ export function DashboardClient() {
               </div>
             )}
 
-            {library && currentChunkIndex < totalChunks && chunkProposal && (
+            {library && !allChunksProcessed && chunkProposal && (
               <label className="flex-1 sm:flex-none inline-flex items-center gap-3 rounded-full border border-zinc-800 bg-zinc-900/50 px-5 py-3 text-sm font-medium text-zinc-300 cursor-pointer hover:bg-zinc-800 transition-colors">
                 <input
                   type="checkbox"
@@ -609,12 +681,12 @@ export function DashboardClient() {
             )}
             
           </section>
-        ) : library && currentChunkIndex < totalChunks ? (
+        ) : library && !allChunksProcessed ? (
           <section className="rounded-2xl border border-zinc-800 bg-[#181818] p-8 md:p-12 text-center shadow-xl">
             <div className="inline-flex items-center justify-center w-16 h-16 rounded-full bg-[#1DB954]/20 text-[#1DB954] mb-4">
               <svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg>
             </div>
-            <p className="text-lg md:text-xl font-bold text-white">Ready to analyze chunk {currentChunkIndex + 1} of {totalChunks}.</p>
+            <p className="text-lg md:text-xl font-bold text-white">Ready to analyze chunk {currentChunkIndex + 1} of {dynamicTotalChunks}.</p>
             <p className="mt-2 text-sm text-zinc-400">Click &quot;Process Next 50 Songs&quot; above to generate AI suggestions.</p>
           </section>
         ) : null}
